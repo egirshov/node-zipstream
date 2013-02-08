@@ -86,7 +86,7 @@ ZipStream.prototype.finalize = function(callback) {
   var self = this;
 
   if (self.files.length === 0) {
-    emit('error', 'no files in zip');
+    self.emit('error', 'no files in zip');
     return;
   }
 
@@ -108,7 +108,7 @@ ZipStream.prototype.addFile = function(source, file, callback) {
   var self = this;
 
   if (self.busy) {
-    emit('error', 'previous file not finished');
+    self.emit('error', 'previous file not finished');
     return;
   }
 
@@ -172,7 +172,7 @@ ZipStream.prototype.addFile = function(source, file, callback) {
     deflate.on('end', onEnd);
 
     if (Buffer.isBuffer(source)) {
-      update(chunk);
+      update(source);
       deflate.write(source);
       deflate.end();
     } else {
@@ -220,7 +220,7 @@ ZipStream.prototype._pushLocalFileHeader = function(file) {
   len = buf.write(file.name, 30);           // file name
   buf.writeUInt16LE(len, 26);               // file name length
 
-  len += 30; 
+  len += 30;
   self.queue.push(buf.slice(0, len));
   self.fileptr += len;
 }
