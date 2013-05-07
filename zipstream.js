@@ -172,7 +172,7 @@ ZipStream.prototype.addFile = function(source, file, callback) {
     deflate.on('end', onEnd);
 
     if (Buffer.isBuffer(source)) {
-      update(chunk);
+      update(source);
       deflate.write(source);
       deflate.end();
     } else {
@@ -220,7 +220,7 @@ ZipStream.prototype._pushLocalFileHeader = function(file) {
   len = buf.write(file.name, 30);           // file name
   buf.writeUInt16LE(len, 26);               // file name length
 
-  len += 30; 
+  len += 30;
   self.queue.push(buf.slice(0, len));
   self.fileptr += len;
 }
