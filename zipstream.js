@@ -19,11 +19,11 @@ function ZipStream(opt) {
   self.busy = false;
   self.eof = false;
 
-  self.queue = [];
   self.fileptr = 0;
   self.files = [];
   self.options = opt;
   self.zip64 = false;
+  self.error = false;
 }
 
 util.inherits(ZipStream, stream.Stream);
@@ -43,17 +43,34 @@ function convertDate(d) {
     (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
 }
 
+ZipStream.prototype._pause = function () {
+  var self = this;
+  if (self.source && self.source.pause && self.source.resume) {
+    self.source.pause();
+    self.source_paused = true;
+  }
+}
+
+ZipStream.prototype._resume = function () {
+  var self = this;
+  if (self.source && self.source_paused) {
+    self.source.resume();
+    self.source_paused = false;
+  }
+}
 
 ZipStream.prototype.pause = function() {
   var self = this;
   self.paused = true;
+  self._pause();
 }
 
 ZipStream.prototype.resume = function() {
   var self = this;
-  self.paused = false;
-
-  self._read();
+  if (self.paused) {
+    self.paused = false;
+    self._resume();
+  }
 }
 
 ZipStream.prototype.destroy = function() {
@@ -61,37 +78,34 @@ ZipStream.prototype.destroy = function() {
   self.readable = false;
 }
 
-ZipStream.prototype._read = function() {
-  var self = this;
+ZipStream.prototype._write = function (chunk) {
+  this.emit('data', chunk);
+};
 
-  if (!self.readable || self.paused) { return; }
-
-  if (self.queue.length > 0) {
-    var data = self.queue.shift();
-    self.emit('data', data);
+ZipStream.prototype._emitError = function (message) {
+  if (this.error || this.eof) {
+    return;
   }
-
-  if (self.eof && self.queue.length === 0) {
-    self.emit('end');
-    self.readable = false;
-
-    if (self.callback) {
-      self.callback(self.fileptr);
-    }
-  }
-
-  process.nextTick(function() { self._read(); }); //TODO improve
-}
-
-
+  this.error = true;
+  this.emit('error', new Error(message));
+};
 
 ZipStream.prototype.finalize = function(callback) {
   var self = this;
-  self.callback = callback;
+  if (self.error || self.eof)
+    return;
   self._pushCentralDirectory();
-  self.eof = true;
 
-  process.nextTick(function () { self._read(); });
+  self.eof = true;
+  self.readable = false;
+
+  process.nextTick(function () {
+    self.emit('end');
+
+    if (callback) {
+      callback(self.fileptr);
+    }
+  });
 }
 
 
@@ -107,11 +121,11 @@ ZipStream.prototype.addFile = function(source, file, callback) {
   var self = this;
 
   if (self.busy) {
-    self.emit('error', 'previous file not finished');
+    self._emitError('previous file not finished');
     return;
   }
   if (!file.name) {
-    self.emit('error', 'empty filename');
+    self._emitError('empty filename');
     return;
   }
 
@@ -121,14 +135,18 @@ ZipStream.prototype.addFile = function(source, file, callback) {
 
   self.busy = true;
   self.file = file;
-  self._pushLocalFileHeader(file);
-
+  if (!self._pushLocalFileHeader(file))
+    return;
 
   var checksum = crc32.createCRC32();
   file.uncompressed = 0;
   file.compressed = 0;
 
   function onEnd() {
+    if (self.error) {
+      self.readable = false;
+      return;
+    }
     file.crc32 = checksum.digest();
     if (file.store) { file.compressed = file.uncompressed; }
 
@@ -137,6 +155,7 @@ ZipStream.prototype.addFile = function(source, file, callback) {
 
     self.files.push(file);
     self.busy = false;
+    self.source = null;
     callback();
   }
 
@@ -149,14 +168,14 @@ ZipStream.prototype.addFile = function(source, file, callback) {
 
     if (Buffer.isBuffer(source)) {
       update(source);
-
-      self.queue.push(source);
+      self._write(source);
       process.nextTick(onEnd);
     } else {
+      self.source = source;
       // Assume stream
       source.on('data', function(chunk) {
         update(chunk);
-        self.queue.push(chunk);
+        self._write(chunk);
       });
 
       source.on('end', onEnd);
@@ -168,7 +187,7 @@ ZipStream.prototype.addFile = function(source, file, callback) {
 
     deflate.on('data', function(chunk) {
       file.compressed += chunk.length;
-      self.queue.push(chunk);
+      self._write(chunk);
     });
 
     deflate.on('end', onEnd);
@@ -188,19 +207,17 @@ ZipStream.prototype.addFile = function(source, file, callback) {
       });
     }
   }
-
-  process.nextTick(function() { self._read(); });
 }
 
 ZipStream.prototype.addDirectory = function(file, callback) {
   var self = this;
 
   if (self.busy) {
-    self.emit('error', 'previous file not finished');
+    self._emitError('previous file not finished');
     return;
   }
   if (!file.name) {
-    self.emit('error', 'empty filename');
+    self._emitError('empty filename');
     return;
   }
 
@@ -213,7 +230,8 @@ ZipStream.prototype.addDirectory = function(file, callback) {
   if (file.name[file.name.length - 1] !== '/') {
       file.name += '/';
   }
-  self._pushLocalFileHeader(file);
+  if (!self._pushLocalFileHeader(file))
+    return;
   self._pushDataDescriptor(file);
 
   self.files.push(file);
@@ -241,7 +259,8 @@ ZipStream.prototype._pushLocalFileHeader = function(file) {
   var filenameBuffer = Buffer.isBuffer(file.name) ? file.name : new Buffer(file.name);
   var filenameLength = filenameBuffer.length;
   if (filenameLength > 0xFFFF) {
-      return self.emitError('file name too long');
+      self._emitError('file name too long');
+      return false;
   }
 
   // 30 bytes for the local header, 4 bytes extra ZIP64 field
@@ -268,8 +287,9 @@ ZipStream.prototype._pushLocalFileHeader = function(file) {
     buf.writeUInt16LE(0, 28);                          // extra field length
   }
 
-  self.queue.push(buf);
+  self._write(buf);
   self.fileptr += len;
+  return true;
 }
 
 ZipStream.prototype._pushDataDescriptor = function(file) {
@@ -288,7 +308,7 @@ ZipStream.prototype._pushDataDescriptor = function(file) {
     buf.writeUInt32LE(file.compressed, 8);
     buf.writeUInt32LE(file.uncompressed, 12);
   }
-  self.queue.push(buf);
+  self._write(buf);
   self.fileptr += buf.length;
 }
 
@@ -343,7 +363,7 @@ ZipStream.prototype._pushCentralDirectoryFileHeader = function (index) {
     buf.writeUInt32LE(file.offset, 42);       // relative offset
   }
 
-  self.queue.push(buf);
+  self._write(buf);
   return len;
 };
 
@@ -372,7 +392,7 @@ ZipStream.prototype._pushCentralDirectoryEnd = function (cdsize, cdoffset) {
   }
   buf.writeUInt16LE(0, 20);                     // comment length
 
-  self.queue.push(buf);
+  self._write(buf);
   return len;
 };
 
@@ -408,7 +428,7 @@ ZipStream.prototype._pushZip64CdEndRecord = function (cdsize, cdoffset) {
   buf.writeUInt32LE(cdoffset >>> 0, 48)     // offset of CD
   buf.writeUInt32LE((cdoffset / MAX_32BIT) >>> 0, 52);
 
-  self.queue.push(buf);
+  self._write(buf);
   return len;
 };
 
@@ -426,7 +446,7 @@ ZipStream.prototype._pushZip64CdEndLocator = function (zip64offset) {
 
   buf.writeUInt32LE(1, 16);                   // total number of disks
 
-  self.queue.push(buf);
+  self._write(buf);
   return len;
 };
 
