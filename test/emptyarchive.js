@@ -10,4 +10,6 @@ zip.on('error', function (message) {
 });
 
 // finalize zip without adding any files
-zip.finalize();
+zip.finalize(function () {
+  console.log('ok!');
+});

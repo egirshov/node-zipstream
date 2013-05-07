@@ -20,12 +20,6 @@ for (var i=0; i<20000; i++) {
   buf.writeUInt8(i&255, i);
 }
 
-// create a file using the buffer
-
-zip.addFile(buf, { name: 'buffer.out', date: new Date('April 13, 2011 CET'), store: true }, function() {
-  zip.finalize();
-});
-
 
 // compute digest of zip output and compare
 
@@ -45,3 +39,10 @@ zip.on('end', function() {
     console.log('ERROR! mismatch between expected and computed digest');
   }
 });
+
+// create a file using the buffer
+
+zip.addFile(buf, { name: 'buffer.out', date: new Date('April 13, 2011 CET'), store: true }, function() {
+  zip.finalize();
+});
+

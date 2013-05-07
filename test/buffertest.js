@@ -20,13 +20,6 @@ for (var i=0; i<20000; i++) {
   buf.writeUInt8(i&255, i);
 }
 
-// create a file using the buffer
-
-zip.addFile(buf, { name: 'buffer.out', date: new Date('April 13, 2011 CET') }, function() {
-  zip.finalize();
-});
-
-
 // compute digest of zip output and compare
 
 var hash = crypto.createHash('sha1');
@@ -44,4 +37,9 @@ zip.on('end', function() {
   } else {
     console.log('ERROR! mismatch between expected and computed digest');
   }
+});
+
+// create a file using the buffer
+zip.addFile(buf, { name: 'buffer.out', date: new Date('April 13, 2011 CET') }, function() {
+  zip.finalize();
 });
