@@ -86,7 +86,7 @@ ZipStream.prototype.finalize = function(callback) {
   var self = this;
 
   if (self.files.length === 0) {
-    emit('error', 'no files in zip');
+    self.emit('error', 'no files in zip');
     return;
   }
 
@@ -108,7 +108,7 @@ ZipStream.prototype.addFile = function(source, file, callback) {
   var self = this;
 
   if (self.busy) {
-    emit('error', 'previous file not finished');
+    self.emit('error', 'previous file not finished');
     return;
   }
 
