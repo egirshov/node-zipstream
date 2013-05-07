@@ -87,15 +87,11 @@ ZipStream.prototype._read = function() {
 
 ZipStream.prototype.finalize = function(callback) {
   var self = this;
-
-  if (self.files.length === 0) {
-    self.emit('error', 'no files in zip');
-    return;
-  }
-
   self.callback = callback;
   self._pushCentralDirectory();
   self.eof = true;
+
+  process.nextTick(function () { self._read(); });
 }
 
 
@@ -114,6 +110,10 @@ ZipStream.prototype.addFile = function(source, file, callback) {
     self.emit('error', 'previous file not finished');
     return;
   }
+  if (!file.name) {
+    self.emit('error', 'empty filename');
+    return;
+  }
 
   if (typeof source === 'string') {
     source = new Buffer(source, 'utf-8');
@@ -127,7 +127,6 @@ ZipStream.prototype.addFile = function(source, file, callback) {
   var checksum = crc32.createCRC32();
   file.uncompressed = 0;
   file.compressed = 0;
-
 
   function onEnd() {
     file.crc32 = checksum.digest();
@@ -193,6 +192,38 @@ ZipStream.prototype.addFile = function(source, file, callback) {
   process.nextTick(function() { self._read(); });
 }
 
+ZipStream.prototype.addDirectory = function(file, callback) {
+  var self = this;
+
+  if (self.busy) {
+    self.emit('error', 'previous file not finished');
+    return;
+  }
+  if (!file.name) {
+    self.emit('error', 'empty filename');
+    return;
+  }
+
+  self.busy = true;
+  file.store = true;
+  file.crc32 = 0;
+  file.uncompressed = 0;
+  file.compressed = 0;
+
+  if (file.name[file.name.length - 1] !== '/') {
+      file.name += '/';
+  }
+  self._pushLocalFileHeader(file);
+  self._pushDataDescriptor(file);
+
+  self.files.push(file);
+
+  process.nextTick(function () {
+    self.busy = false;
+    callback();
+  });
+}
+
 //TODO remove listeners on end
 
 
@@ -207,8 +238,15 @@ ZipStream.prototype._pushLocalFileHeader = function(file) {
   file.moddate = convertDate(file.date);
   file.offset = self.fileptr;
 
-  var buf = new Buffer(1024);
-  var len;
+  var filenameBuffer = Buffer.isBuffer(file.name) ? file.name : new Buffer(file.name);
+  var filenameLength = filenameBuffer.length;
+  if (filenameLength > 0xFFFF) {
+      return self.emitError('file name too long');
+  }
+
+  // 30 bytes for the local header, 4 bytes extra ZIP64 field
+  var len = filenameLength + 30 + (self.zip64 ? 4 : 0);
+  var buf = new Buffer(len);
 
   buf.writeUInt32LE(0x04034b50, 0);         // local file header signature
   buf.writeUInt16LE(file.version, 4);       // version needed to extract
@@ -218,22 +256,19 @@ ZipStream.prototype._pushLocalFileHeader = function(file) {
   buf.writeInt32LE(0, 14);                  // crc32
   buf.writeUInt32LE(0, 18);                 // compressed size
   buf.writeUInt32LE(0, 22);                 // uncompressed size
-  len = buf.write(file.name, 30);           // file name
-  buf.writeUInt16LE(len, 26);               // file name length
-
-  len += 30;
+  buf.writeUInt16LE(filenameLength, 26);    // file name length
+  filenameBuffer.copy(buf, 30);             // file name
 
   if (self.zip64) {
     // An empty extra field is written to indicate that Data Descriptor is ZIP64 long
-    buf.writeUInt16LE(4, 28);               // extra field length
-    buf.writeUInt16LE(0x0001, len);         // header ID: ZIP64
-    buf.writeUInt16LE(0, len + 2);          // data size
-    len += 4;
+    buf.writeUInt16LE(4, 28);                          // extra field length
+    buf.writeUInt16LE(0x0001, filenameLength + 30);    // header ID: ZIP64
+    buf.writeUInt16LE(0, filenameLength + 32);         // data size
   } else {
-    buf.writeUInt16LE(0, 28);               // extra field length
+    buf.writeUInt16LE(0, 28);                          // extra field length
   }
 
-  self.queue.push(buf.slice(0, len));
+  self.queue.push(buf);
   self.fileptr += len;
 }
 
@@ -260,8 +295,12 @@ ZipStream.prototype._pushDataDescriptor = function(file) {
 ZipStream.prototype._pushCentralDirectoryFileHeader = function (index) {
   var self = this;
   var file = self.files[index];
-  var buf = new Buffer(1024);
-  var len;
+
+  var filenameBuffer = Buffer.isBuffer(file.name) ? file.name : new Buffer(file.name);
+  var filenameLength = filenameBuffer.length;
+  // 46 bytes for the file header + 28 for ZIP64 extra field
+  var len = filenameLength + 46 + (self.zip64 ? 28 : 0);
+  var buf = new Buffer(len);
 
   // central directory file header
   buf.writeUInt32LE(0x02014b50, 0);         // central file header signature
@@ -271,36 +310,32 @@ ZipStream.prototype._pushCentralDirectoryFileHeader = function (index) {
   buf.writeUInt16LE(file.method, 10);       // compression method
   buf.writeUInt32LE(file.moddate, 12);      // last mod file time and date
   buf.writeInt32LE(file.crc32, 16);         // crc-32
-
+  buf.writeUInt16LE(filenameLength, 28);    // file name length
   buf.writeUInt16LE(0, 32);                 // file comment length
   buf.writeUInt16LE(0, 34);                 // disk number where file starts
   buf.writeUInt16LE(0, 36);                 // internal file attributes
   buf.writeUInt32LE(0, 38);                 // external file attributes
 
-  len = buf.write(file.name, 46);           // file name
-  buf.writeUInt16LE(len, 28);               // file name length
-
-  len += 46;
+  filenameBuffer.copy(buf, 46);             // file name
 
   if (self.zip64) {
     buf.writeUInt32LE(0xFFFFFFFF, 20);      // compressed size
     buf.writeUInt32LE(0xFFFFFFFF, 24);      // uncompressed size
     buf.writeUInt32LE(0xFFFFFFFF, 42);      // relative offset
 
-    var extra_size = 24;                    // original/compressed + relative offset
-    buf.writeUInt16LE(extra_size + 4, 30);  // extra field length
+    var extraSize = 24;                     // original/compressed + relative offset
+    var offset = filenameLength + 46;       // position of extra fields
 
-    buf.writeUInt16LE(1, len);              // extra field id (ZIP64)
-    buf.writeUInt16LE(extra_size, len + 2); // extra field size (not including this header)
+    buf.writeUInt16LE(extraSize + 4, 30);   // extra field length
+    buf.writeUInt16LE(1, offset);           // extra field id (ZIP64)
+    buf.writeUInt16LE(extraSize, offset + 2); // extra field size w/o header
 
-    buf.writeUInt32LE(file.uncompressed >>> 0, len + 4);
-    buf.writeUInt32LE(file.uncompressed / MAX_32BIT >>> 0, len + 8);
-    buf.writeUInt32LE(file.compressed >>> 0, len + 12);
-    buf.writeUInt32LE(file.compressed / MAX_32BIT >>> 0, len + 16);
-    buf.writeUInt32LE(file.offset >>> 0, len + 20);
-    buf.writeUInt32LE(file.offset / MAX_32BIT >>> 0, len + 24);
-
-    len += extra_size + 4;
+    buf.writeUInt32LE(file.uncompressed >>> 0, offset + 4);
+    buf.writeUInt32LE(file.uncompressed / MAX_32BIT >>> 0, offset + 8);
+    buf.writeUInt32LE(file.compressed >>> 0, offset + 12);
+    buf.writeUInt32LE(file.compressed / MAX_32BIT >>> 0, offset + 16);
+    buf.writeUInt32LE(file.offset >>> 0, offset + 20);
+    buf.writeUInt32LE(file.offset / MAX_32BIT >>> 0, offset + 24);
   } else {
     buf.writeUInt32LE(file.compressed, 20);   // compressed  size
     buf.writeUInt32LE(file.uncompressed, 24); // uncompressed size
@@ -308,7 +343,7 @@ ZipStream.prototype._pushCentralDirectoryFileHeader = function (index) {
     buf.writeUInt32LE(file.offset, 42);       // relative offset
   }
 
-  self.queue.push(buf.slice(0, len));
+  self.queue.push(buf);
   return len;
 };
 
